@@ -84,8 +84,9 @@ python obsidian_audit.py --all --limit 200 --json > scan.json
 python obsidian_audit.py --text "eval(await (await fetch(u)).text())"
 ```
 
-`--json` for machine-readable output, `--verbose` to print every INFO item. Exit code 2 if any
-target is HIGH or CRITICAL, so it drops into CI or a pre-update hook:
+`--json` (family schema) or `--sarif` (SARIF 2.1.0) for machine-readable output, `--verbose` to print
+every INFO item. Exit code 2 if any target is HIGH or CRITICAL (tune with `--fail-on`, see
+[Output formats and CI](#output-formats-and-ci)), so it drops into CI or a pre-update hook:
 
 ```bash
 python obsidian_audit.py --vault ~/Notes || echo "review before enabling"
@@ -110,6 +111,48 @@ popular plugins (git integration, self-hosted sync, plugin manager, shell comman
 template engine, disclosed telemetry, Keychain read for the app's own API), plus a regression
 test that a 5 MB single-line minified bundle scans in a few seconds. Canary hosts are reserved
 (`.invalid`, TEST-NET) and canary tokens are obviously fake.
+
+## Output formats and CI
+
+These flags are shared by every scanner in the eltociear `*-audit` family and behave the same way in each.
+
+| flag | effect |
+|---|---|
+| `--json` | machine-readable report in the family schema `eltociear-audit/1` (below) |
+| `--sarif` | SARIF 2.1.0 on stdout, for GitHub code scanning (`github/codeql-action/upload-sarif`) and other SARIF viewers |
+| `--fail-on {critical,high,medium,low,never}` | exit `2` when any target reaches that level. Default `high`, which is the original behaviour. `never` always exits `0` |
+| `--version` | prints `obsidian-audit <version>` |
+
+Exit codes: `0` means no target reached the `--fail-on` level, `2` means at least one did, and `1` is a usage error. If a target can't be fetched or parsed, it's reported with `error` set (in SARIF, as a `toolExecutionNotifications` entry with `executionSuccessful: false`). An error alone doesn't change the exit code, so check `errors` in `--json` if a failed fetch should fail your job.
+
+`--json` schema (`eltociear-audit/1`, one shape for the whole family):
+
+```
+{
+  "schema": "eltociear-audit/1",
+  "tool": {"name": "obsidian-audit", "version": "x.y.z"},
+  "fail_on": "high", "exit_code": 2, "max_severity": "CRITICAL", "errors": 0,
+  "results": [{
+    "target": "...", "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE", "risk_score": 0-100,
+    "error": null, "counts": {"CRITICAL": 1, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+    "findings": [{"rule_id": "...", "severity": "CRITICAL", "name": "...", "description": "...",
+                  "file": "path/in/target", "line": 12, "matched": "...", "context": "..."}],
+    "info": [ same shape, severity "INFO": capability context that never raises the risk ],
+    "...": "scanner-specific extra fields, unchanged from earlier versions"
+  }]
+}
+```
+
+`results` is always a list, even when there's only one target. Each finding also keeps the scanner's own keys, such as `id`. In SARIF, `CRITICAL` and `HIGH` map to `error`, `MEDIUM` to `warning` and `LOW` to `note`. Rules carry a `security-severity` (9.5 / 8.0 / 5.5 / 3.0), and INFO context isn't emitted. For local targets, `artifactLocation.uri` is relative to the working directory, so run the scanner from the repository root.
+
+```yaml
+- run: python3 obsidian_audit.py . --sarif --fail-on never > obsidian-audit.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  with: {sarif_file: obsidian-audit.sarif}
+- run: python3 obsidian_audit.py . --fail-on high
+```
+
+Hostile input handling: archives are read in memory and never extracted to disk. Archive members whose names are traversal (`../`), absolute or drive-letter paths, or contain NUL are skipped. Symlink, hardlink, device and FIFO members are ignored. Each archive has a budget of decompressed bytes and members (bomb protection). Local directory walks only open regular files, so symlinks (including loops and links out of the tree), FIFOs and devices are never followed or read.
 
 ## Related
 
